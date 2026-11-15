@@ -211,15 +211,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Response shape (official): decision + reason_code + proof_tx.
-      // The decision proof rides along as `proof` when generatable —
+      // The decision proof rides along FLAT as `proof` + `public_signals`
+      // when generatable (per the official starter prompt's signed
+      // response { decision, reason_code, proof, public_signals }) —
       // the score model penalizes a provable task answered without one.
+      // A nested copy is kept under `proof_detail` for audit/debugging.
       const response = {
         decision: decision.decision,
         reason_code: decision.reason_code,
         ...(task.proofTx ? { proof_tx: task.proofTx } : {}),
         ...(proof
           ? {
-              proof: {
+              proof: proof.proof,
+              public_signals: proof.publicSignals,
+              proof_detail: {
                 circuitVersion: CIRCUIT_VERSION,
                 proof: proof.proof,
                 publicSignals: proof.publicSignals,
