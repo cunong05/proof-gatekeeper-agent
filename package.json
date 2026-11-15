@@ -1,0 +1,13 @@
+{
+  "name": "proof-gatekeeper-agent",
+  "version": "1.0.0",
+  "description": "Proof Gatekeeper agent for zkVerify Agent Games Season 01 (CUNONG-1)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/policy.test.js"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "dependencies": { "snarkjs": "0.7.6" }
+}
