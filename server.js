@@ -91,6 +91,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, healthPayload());
     }
 
+    if (req.method === "GET" && (req.url === "/gatekeeper" || req.url === "/agent")) {
+      return sendJson(res, 200, { ok: true, protocolVersion: "v1" }, true);
+    }
+
     if (req.method === "POST" && (req.url === "/gatekeeper" || req.url === "/agent")) {
       const rawBody = await readBody(req);
 
@@ -102,11 +106,38 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // An empty signed body is the platform's preflight probe.
+      if (rawBody.length === 0) {
+        return sendJson(res, 200, { ok: true, protocolVersion: "v1" }, true);
+      }
+
       let parsed;
       try {
         parsed = JSON.parse(rawBody.toString("utf8"));
       } catch {
         return sendJson(res, 400, { error: "invalid json" });
+      }
+
+      // Platform preflight: saving the endpoint configuration runs a signed
+      // check that carries no task. It expects HTTP 200 with
+      // { ok: true, protocolVersion: "v1" } and a valid response signature.
+      // A body with no task identifier can never be a scored task, so it is
+      // answered as preflight rather than rejected.
+      const isPreflight =
+        parsed &&
+        typeof parsed === "object" &&
+        (parsed.preflight === true ||
+          parsed.mode === "preflight" ||
+          parsed.event === "preflight" ||
+          (typeof parsed.type === "string" &&
+            /preflight|health|ping/i.test(parsed.type)) ||
+          (parsed.task_id == null &&
+            parsed.taskId == null &&
+            parsed.id == null &&
+            parsed.input == null &&
+            parsed.field == null));
+      if (isPreflight) {
+        return sendJson(res, 200, { ok: true, protocolVersion: "v1" }, true);
       }
 
       const task = normalizeTask(parsed);
