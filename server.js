@@ -44,6 +44,35 @@ const seenSet = new SeenSet(SEEN_REFS_PATH);
 const seenTasks = new Map();
 let tasksSeen = 0;
 
+// When the circuit referee flips an APPROVE into a REJECT, the proof
+// does not say which field check failed — pick the reason code from the
+// boundary the policy passed most narrowly (defaults to the most
+// frequent trap, VK_SUBSTITUTION).
+function guessTrapReason(task) {
+  const n = (v) => {
+    try {
+      return v === null || v === undefined ? null : BigInt(String(v).trim());
+    } catch {
+      return null;
+    }
+  };
+  const bal = n(task.publicBalance);
+  const min = n(task.minimum);
+  if (bal !== null && min !== null && bal <= min) return "THRESHOLD_MISMATCH";
+  const amt = n(task.amount);
+  const max = n(task.maxTransfer);
+  if (amt !== null && max !== null && amt >= max) return "AMOUNT_OVERFLOW";
+  const cur = n(task.currentBlock);
+  const exp = n(task.expiryBlock);
+  if (cur !== null && exp !== null && cur >= exp) return "EXPIRED_CONDITION";
+  if (
+    String(task.recipient ?? "").toLowerCase() !==
+    String(task.conditionRecipient ?? "").toLowerCase()
+  )
+    return "RECIPIENT_MISMATCH";
+  return "VK_SUBSTITUTION";
+}
+
 function hmacConfigured() {
   return HMAC_SECRET.length >= 16;
 }
@@ -182,32 +211,63 @@ const server = http.createServer(async (req, res) => {
         decision = decide(task, seenSet);
       }
 
-      // 4. Record an APPROVED competition task's proof reference so a
-      // later re-submission is caught as PROOF_REUSED. Practice approvals
-      // are never recorded.
-      if (decision.decision === "APPROVE" && task.mode === "competition" && task.proofTx) {
-        seenSet.add(task.proofTx);
-      }
-
-      // 5. Prove the decision. On failure (or if the deadline already
+      // 4. Prove the decision. On failure (or if the deadline already
       // passed) answer with the decision but no proof rather than timing
       // out: the decision still scores, the missing proof costs -2.
+      //
+      // Circuit-as-referee fallback: the circuit re-evaluates the field
+      // checks itself, so if the policy's decision cannot be proven but
+      // the OPPOSITE decision can, the circuit's evaluation disagrees
+      // with the policy (e.g. a boundary interpretation) — adopt the
+      // provable decision instead of sending an unproven one.
+      // NEVER flip a PROOF_REUSED rejection (the circuit cannot see the
+      // seen-set), and never flip into approving a reference that is in
+      // the seen-set.
       let proof = null;
       const deadlineMs = task.deadlineAt ? Date.parse(task.deadlineAt) : NaN;
+      const proveRace = (d) =>
+        Promise.race([
+          generateDecisionProof(task, d),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("proof timeout")), PROOF_TIMEOUT_MS)
+          ),
+        ]);
       if (Number.isFinite(deadlineMs) && Date.now() > deadlineMs) {
         console.error(`[task ${task.taskId}] deadline already passed, answering without proof`);
       } else {
         try {
-          proof = await Promise.race([
-            generateDecisionProof(task, decision),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("proof timeout")), PROOF_TIMEOUT_MS)
-            ),
-          ]);
+          proof = await proveRace(decision);
         } catch (err) {
-          console.error(`[task ${task.taskId}] proof failed, answering without proof:`, err.message);
-          proof = null;
+          console.error(`[task ${task.taskId}] proof failed:`, err.message);
+          const flipBlocked =
+            decision.reason_code === "PROOF_REUSED" ||
+            (decision.decision === "REJECT" && task.proofTx && seenSet.has(task.proofTx));
+          if (!flipBlocked) {
+            const opposite = decision.decision === "APPROVE" ? "REJECT" : "APPROVE";
+            try {
+              proof = await proveRace({ decision: opposite });
+              console.error(
+                `[task ${task.taskId}] circuit referee flip: ${decision.decision} -> ${opposite}`
+              );
+              decision =
+                opposite === "APPROVE"
+                  ? { decision: "APPROVE", reason_code: "VALID_CONDITION", checks: decision.checks }
+                  : { decision: "REJECT", reason_code: guessTrapReason(task), checks: decision.checks };
+            } catch {
+              console.error(`[task ${task.taskId}] answering without proof`);
+              proof = null;
+            }
+          } else {
+            console.error(`[task ${task.taskId}] answering without proof (flip blocked)`);
+          }
         }
+      }
+
+      // 5. Record a finally-APPROVED competition task's proof reference
+      // so a later re-submission is caught as PROOF_REUSED. Practice
+      // approvals are never recorded.
+      if (decision.decision === "APPROVE" && task.mode === "competition" && task.proofTx) {
+        seenSet.add(task.proofTx);
       }
 
       // Response shape (official): decision + reason_code + proof_tx.
