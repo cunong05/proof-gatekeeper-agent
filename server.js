@@ -145,6 +145,13 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: "missing task_id" });
       }
 
+      // Capture the envelope shape (esp. the first practice task): the
+      // circuit input mapping can only be derived from a real task body.
+      console.log(
+        `[task ${task.taskId}] mode=${task.mode} envelope=` +
+          JSON.stringify(parsed).slice(0, 4000)
+      );
+
       // Retry of the same task: return the exact cached response. The
       // seen-set is NOT touched again — a retry must not double-record.
       if (seenTasks.has(task.taskId)) {
